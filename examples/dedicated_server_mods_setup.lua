@@ -1,0 +1,2 @@
+-- Download Workshop mods here; enable them in each shard's modoverrides.lua.
+-- ServerModSetup("WORKSHOP_ID")

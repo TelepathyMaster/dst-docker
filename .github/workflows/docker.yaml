@@ -1,0 +1,85 @@
+name: Docker CI and release
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check and test scripts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          for script in scripts/*.sh tests/*.sh; do bash -n "$script"; done
+          shellcheck -x scripts/*.sh tests/*.sh
+          tests/runtime.sh
+          tests/release.sh
+          docker compose config --quiet
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: dst:ci
+      - name: Verify default user and tools
+        run: |
+          docker run --rm --entrypoint bash dst:ci -ec '
+            test "$(id -u)" = 1000
+            test "$(id -g)" = 1000
+            test -w /opt/dst && test -w /data
+            test -x /usr/local/share/steamcmd/steamcmd.sh
+            test -x /usr/local/share/steamcmd/linux32/steamcmd
+            test -x /usr/bin/tini
+          '
+      - name: Verify Docker signal forwarding and custom UID
+        run: tests/docker.sh dst:ci
+
+  publish:
+    needs: verify
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    # Serialize all releases: older versions must never move latest backwards.
+    concurrency:
+      group: dockerhub-publish
+      cancel-in-progress: false
+    env:
+      DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Verify immutable tags and select latest
+        id: release
+        shell: bash
+        run: scripts/release-tags.sh "${GITHUB_REF_NAME#v}" "$DOCKERHUB_REPOSITORY" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        id: meta
+        with:
+          images: ${{ vars.DOCKERHUB_REPOSITORY }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ steps.release.outputs.version }}
+            type=raw,value=sha-${{ github.sha }}
+            type=raw,value=latest,enable=${{ steps.release.outputs.latest }}
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
