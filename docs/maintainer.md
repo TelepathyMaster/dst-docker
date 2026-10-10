@@ -66,6 +66,8 @@ git push origin v1.0.0
 
 ## 检查与发布前验收
 
+本地检查需要 Bash、ShellCheck、ripgrep（`rg`）、Docker Engine 和 Docker Compose。CI 会显式安装 ShellCheck 和 ripgrep；测试脚本使用 `rg` 检查日志与配置。
+
 ```bash
 for script in scripts/*.sh tests/*.sh; do bash -n "$script"; done
 shellcheck -x scripts/*.sh tests/*.sh
