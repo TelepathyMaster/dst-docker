@@ -24,6 +24,8 @@ touch "$TEST_ROOT/game-ready"
 trap 'echo unexpected-term >>"$TEST_ROOT/game-signals"; exit 99' TERM INT
 while IFS= read -r command; do
     if [[ $command == 'c_shutdown()' ]]; then
+        # Model DST waiting for its console reader to observe EOF on shutdown.
+        while IFS= read -r ignored; do :; done
         printf 'saved\n' >"$TEST_ROOT/saved"
         exit "${MOCK_GAME_EXIT:-0}"
     fi

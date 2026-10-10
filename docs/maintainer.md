@@ -1,0 +1,83 @@
+# 维护与发布
+
+这份文档面向仓库维护者。开服、Mod 和存档操作请参阅 [中文用户指南](../README.zh-CN.md)（[English](../README.md)）。
+
+## 从源码构建并开服
+
+Docker Hub 镜像用户直接按 README 创建部署目录即可。仓库根目录的 `compose.yaml` 面向本地构建，默认使用 `dst:local`，Mod 下载列表挂载来源为 `examples/dedicated_server_mods_setup.lua`。
+
+```bash
+git clone https://github.com/TelepathyMaster/dst-docker.git
+cd dst-docker
+mkdir -p data/DoNotStarveTogether/Cluster_1
+cp -a examples/cluster/. data/DoNotStarveTogether/Cluster_1/
+```
+
+按 README 填写 Token、房间信息、随机 `cluster_key`、世界生成和 Mod 配置。使用仓库 Compose 时，在 `examples/dedicated_server_mods_setup.lua` 中维护下载列表。准备好配置后启动：
+
+```bash
+sudo chown -R 1000:1000 data
+sudo chmod 600 data/DoNotStarveTogether/Cluster_1/cluster_token.txt
+docker compose up -d --build
+docker compose logs -f
+```
+
+取得新版源码后，正常停服，再执行 `docker compose up -d --build` 重新构建并启动。存档和配置仍在 `data/` 中。
+
+## 镜像与运行接口
+
+基础镜像使用 `debian:trixie-slim`，固定 digest；升级基础镜像时需要同时验证 SteamCMD 的 32 位依赖与 DST 的 64 位运行依赖。镜像只提供安装工具及脚本，游戏和 Mod 在运行时下载，不随镜像分发。
+
+| 命令 | 行为 |
+| --- | --- |
+| `start`（默认） | 检查配置，安装或更新游戏，再运行分片 |
+| `update` | 仅安装或更新游戏，首次安装自动校验 |
+| `update --validate` | 更新并校验安装文件 |
+| `run` | 跳过 SteamCMD，运行已安装游戏 |
+
+环境变量为 `CLUSTER_NAME=Cluster_1`、`SHARD=Master`，首版支持 `Master` 与 `Caves`。`/opt/dst` 保存游戏安装和 Mod 缓存，`/data` 保存集群配置、Token 和存档，`/config/dedicated_server_mods_setup.lua` 为可选的只读下载列表。
+
+默认 UID/GID 为 `1000:1000`，支持指定用户运行，权限不足时报错。入口脚本对游戏安装目录及分片持锁，阻止运行时覆盖安装文件或重复启动；更新失败后留下标记，禁止直接运行未完成的安装。
+
+Tini 作为 PID 1。监督脚本在游戏阶段收到 TERM/INT 后，通过控制台发送 `c_shutdown()` 并关闭输入，等待游戏保存退出；超时才终止进程。更新阶段收到停止信号则终止更新进程组。验证关闭行为时需要同时检查保存日志、退出状态及重启后的世界恢复。
+
+## GitHub Actions 与 Docker Hub
+
+将此目录提交到 GitHub 的 `main` 分支。在 Docker Hub 创建公开仓库，在 GitHub 仓库 Actions 配置：
+
+| 类型 | 名称 | 内容 |
+| --- | --- | --- |
+| Variable | `DOCKERHUB_USERNAME` | 具有推送权限的 Docker Hub 用户名 |
+| Variable | `DOCKERHUB_REPOSITORY` | `namespace/repository` |
+| Secret | `DOCKERHUB_TOKEN` | Docker Hub 访问令牌 |
+
+PR、main 提交、手动触发只检查与构建，不访问发布凭据或推送。发布稳定标签：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+发布流程验证通过后生成 `1.0.0`、`sha-<完整commit>`，以及适用的 `latest`。`latest` 只随最高稳定版本前进；补发旧版本不会回退。预发布及非法 SemVer 标签不会发布。版本与 SHA 标签存在时拒绝覆盖，因此不同版本需有各自提交，修复用新版本发布。所有 Actions 固定完整 SHA，基础镜像固定 digest。
+
+发布任务串行执行，并查询公开 Docker Hub 标签。如果标签查询失败则中止发布。请通过本工作流管理发布标签；外部手动推送不会受到该保护。Docker Hub 推送并非多标签原子事务，部分推送失败后应检查已创建标签，修复用新提交、新版本发布。
+
+工作流采用 [Docker 官方 GitHub Actions 工具](https://docs.docker.com/build/ci/github-actions/manage-tags-labels/)。镜像配置路径依据 [Klei 命令行文档](https://support.klei.com/hc/en-us/articles/360029556192-Dedicated-Server-Command-Line-Options-Guide)，控制台关闭依据 [Klei 论坛说明](https://kleiforums.com/forums/topic/51535-stopping-dedicated-server-gracefully/)。
+
+## 检查与发布前验收
+
+```bash
+for script in scripts/*.sh tests/*.sh; do bash -n "$script"; done
+shellcheck -x scripts/*.sh tests/*.sh
+tests/runtime.sh
+tests/release.sh
+docker compose config --quiet
+docker build --platform linux/amd64 -t dst:local .
+tests/docker.sh dst:local
+```
+
+替身测试覆盖安装与修复、失败标记、命令分流、锁冲突、进程组退出、存档请求、退出码及发布版本策略。Docker 测试通过真实 Tini 转发 TERM/INT，并检查 UID 1000 和自定义 UID 1234。CI 不使用真实 Token。
+
+首次公开发布前仍需有效 Token 和客户端进行实机验收：Master/Caves 联通、进入洞穴、实际 Workshop Mod 下载启用、正常停服保存、容器重建后恢复世界，以及发布镜像拉取运行。
+
+本项目的脚本及文档使用 MIT 许可证。DST、SteamCMD 和 Workshop Mod 遵循各自许可证。

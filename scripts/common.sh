@@ -15,6 +15,7 @@ phase=idle
 stop_requested=0
 console_dir=
 shutdown_timer=
+shutdown_sent=0
 
 log() { printf '[dst] %s\n' "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -77,8 +78,14 @@ stop_child() {
     stop_requested=1
     [[ -n $active_child ]] || return 0
     if [[ $phase == game ]]; then
-        # Keep the writer open so DST never sees an accidental console EOF.
+        (( shutdown_sent == 0 )) || return 0
+        # Send the shutdown command before ending console input.
         if printf 'c_shutdown()\n' >&3; then
+            shutdown_sent=1
+            # Release stdin after the command. DST joins its console reader on
+            # shutdown; an open FIFO writer can leave that thread blocked.
+            # Close before spawning the timer so it cannot inherit the writer.
+            exec 3>&-
             log 'Shutdown requested; waiting for world save'
             # Docker allows 120s; leave 10s for process cleanup.
             arm_kill_timer 110

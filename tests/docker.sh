@@ -29,6 +29,8 @@ trap 'echo BAD_SIGNAL; exit 99' TERM INT
 printf 'FIXTURE_READY\n'
 while IFS= read -r command; do
     if [[ $command == 'c_shutdown()' ]]; then
+        # Model DST joining its console input thread before process exit.
+        while IFS= read -r ignored; do :; done
         printf 'fixture-save\n' >/data/saved
         printf 'FIXTURE_SAVED\n'
         exit 17

@@ -1,158 +1,471 @@
 # DST Docker
 
-饥荒联机版（Don't Starve Together）专用服务器镜像，仅支持 `linux/amd64`。同一镜像分别运行 Master/Caves；首次启动下载 Steam App `343050`，以后每次启动检查更新。游戏文件和 Mod 缓存不打包到公开镜像，保存在每个分片的独立 Volume 中。
+[简体中文](README.zh-CN.md)
 
-## 快速开始
+Run a Don't Starve Together dedicated server with Docker, including the surface (Master) and caves (Caves). Start a new world or bring your existing saves. The server downloads the game on first startup and checks for updates on subsequent starts; no separate updater container is required.
 
-需要 Linux x86_64、Docker Engine 与 Docker Compose。两个安装目录需要预留约 10 GB 以上磁盘空间，另加存档和 Mod 空间。首次安装需要能够连接 Steam。
+You need Linux x86_64 (`linux/amd64`), Docker Engine, and Docker Compose. Each shard keeps its own game installation, so allow at least 10 GB of disk space, plus room for saves and mods. The server must be able to reach Steam and Klei.
+
+- [Start your first server](#start-your-first-server)
+- [Configure mods](#configure-mods)
+- [Migrate an existing world](#migrate-an-existing-world)
+- [Update the game and image](#update-the-game-and-image)
+- [Save, back up, and regenerate worlds](#save-back-up-and-regenerate-worlds)
+- [Troubleshooting](#troubleshooting)
+
+## Start your first server
+
+### 1. Create a deployment directory and Compose configuration
+
+Create a directory for Compose, configuration, and saves. Run all following commands from this directory:
 
 ```bash
-docker compose build
-mkdir -p data/DoNotStarveTogether/Cluster_1
-cp -a examples/cluster/. data/DoNotStarveTogether/Cluster_1/
+mkdir dst-server
+cd dst-server
 ```
 
-编辑 `data/DoNotStarveTogether/Cluster_1/cluster.ini`，修改集群名称、密码和 `cluster_key`。通过 [Klei 账号页面](https://accounts.klei.com/) 获取服务器 Token，用编辑器写入该目录的 `cluster_token.txt`，文件只包含 Token；不要提交到 Git。
+Create `.env` with the Docker Hub image and tag you want to use:
+
+```dotenv
+DST_IMAGE=your-namespace/your-image:1.0.0
+```
+
+This address is a placeholder. Replace it with an actual published image and tag. Then create `compose.yml`:
+
+```yaml
+x-dst: &dst
+  image: ${DST_IMAGE:?Set DST_IMAGE in .env}
+  platform: linux/amd64
+  restart: unless-stopped
+  stop_grace_period: 120s
+  networks: [dst]
+
+services:
+  master:
+    <<: *dst
+    environment:
+      CLUSTER_NAME: Cluster_1
+      SHARD: Master
+    volumes:
+      - master-game:/opt/dst
+      - ./data:/data
+      - ./config/dedicated_server_mods_setup.lua:/config/dedicated_server_mods_setup.lua:ro
+    ports:
+      - "10999:10999/udp"
+  caves:
+    <<: *dst
+    environment:
+      CLUSTER_NAME: Cluster_1
+      SHARD: Caves
+    volumes:
+      - caves-game:/opt/dst
+      - ./data:/data
+      - ./config/dedicated_server_mods_setup.lua:/config/dedicated_server_mods_setup.lua:ro
+    ports:
+      - "11000:11000/udp"
+
+volumes:
+  master-game:
+  caves-game:
+networks:
+  dst:
+    driver: bridge
+```
+
+Check these settings for your deployment:
+
+| Setting | Purpose and how to change it |
+| --- | --- |
+| `image` / `DST_IMAGE` in `.env` | Docker Hub image and tag; use the same version for both services |
+| `CLUSTER_NAME` | Cluster directory under `/data/DoNotStarveTogether/`; must match in both services, defaults to `Cluster_1` |
+| `SHARD` | Shard directory within the cluster: `Master` or `Caves` |
+| `./data:/data` | Mounts local configuration, token, and saves; both services share this directory |
+| `master-game:/opt/dst`, `caves-game:/opt/dst` | Store game installations and mod caches in separate volumes for each shard |
+| `./config/dedicated_server_mods_setup.lua:…:ro` | Mounts the local mod download list read-only into both containers; create the file before startup |
+| `ports` | `host-port:container-port/udp`; container ports match `server_port` in the `server.ini` files below |
+| `networks` | Lets caves reach the surface by service name `master`, matching `master_ip = master` in `cluster.ini` |
+| `stop_grace_period` | Time allowed for saving during shutdown; keep `120s` |
+| `restart` | `unless-stopped` restarts containers after unexpected exits and keeps them stopped after a manual stop |
+
+The following steps use the default paths and ports. If you change `CLUSTER_NAME` or the source of the `./data` mount, adjust the file paths below. For internet players, allow both host UDP ports through your firewall and router: `10999` and `11000` by default. Shard communication on port `10888` stays within the Docker network.
+
+### 2. Prepare world configuration and a token
+
+For existing saves, follow [Migrate an existing world](#migrate-an-existing-world), then return to “Pull the image and start.” For a new world, create the files below:
+
+```bash
+mkdir -p data/DoNotStarveTogether/Cluster_1/{Master,Caves} config
+printf '%s\n' '-- No Workshop mods configured.' > config/dedicated_server_mods_setup.lua
+```
+
+```text
+dst-server/
+├── compose.yml
+├── .env
+├── config/
+│   └── dedicated_server_mods_setup.lua
+└── data/DoNotStarveTogether/Cluster_1/
+    ├── cluster.ini
+    ├── cluster_token.txt
+    ├── Master/
+    │   ├── server.ini
+    │   ├── worldgenoverride.lua
+    │   └── modoverrides.lua
+    └── Caves/
+        ├── server.ini
+        ├── worldgenoverride.lua
+        └── modoverrides.lua
+```
+
+Create `data/DoNotStarveTogether/Cluster_1/cluster.ini` with:
+
+```ini
+[GAMEPLAY]
+game_mode = survival
+max_players = 6
+pvp = false
+pause_when_empty = true
+
+[NETWORK]
+cluster_name = My DST Server
+cluster_description = Docker dedicated server
+cluster_password =
+cluster_intention = cooperative
+
+[MISC]
+console_enabled = true
+
+[SHARD]
+shard_enabled = true
+bind_ip = 0.0.0.0
+master_ip = master
+master_port = 10888
+cluster_key = CHANGE_ME_TO_A_SHARED_RANDOM_VALUE
+```
+
+Set your server name (`cluster_name`), join password (`cluster_password`), and player limit (`max_players`). Replace `cluster_key` with your own random string. `cluster_password` is for players joining; `cluster_key` connects the surface and caves. `game_mode = survival` uses survival mode, which starts a world reset countdown when all players die.
+
+Get a dedicated server token from your [Klei account](https://accounts.klei.com/) and put it in `cluster_token.txt` in the same directory. Include only the token, without quotes. This is not your Steam password.
+
+Set the surface port and shard identity in `Master/server.ini`:
+
+```ini
+[NETWORK]
+server_port = 10999
+
+[SHARD]
+is_master = true
+name = Master
+
+[STEAM]
+authentication_port = 8766
+master_server_port = 27016
+```
+
+Create `Caves/server.ini` with:
+
+```ini
+[NETWORK]
+server_port = 11000
+
+[SHARD]
+is_master = false
+name = Caves
+id = 2
+
+[STEAM]
+authentication_port = 8767
+master_server_port = 27017
+```
+
+Create `Master/worldgenoverride.lua` with:
+
+```lua
+return {
+    override_enabled = true,
+    preset = "SURVIVAL_TOGETHER",
+    overrides = {},
+}
+```
+
+Create `Caves/worldgenoverride.lua` with:
+
+```lua
+return {
+    override_enabled = true,
+    preset = "DST_CAVE",
+    overrides = {},
+}
+```
+
+No mods are enabled by default. Create `modoverrides.lua` in each shard directory with:
+
+```lua
+return {}
+```
+
+To customize map size, resources, or other generation options, edit each shard's `worldgenoverride.lua` **before the first startup**. You can also use world configuration exported from the game. See the [Klei world configuration guide](https://kleiforums.com/forums/topic/67039-dedicated-server-world-overrides-guide/) for the format. For mods, complete the download list and shard settings in [Configure mods](#configure-mods).
+
+### 3. Pull the image and start
+
+The containers run as UID/GID `1000:1000` by default. Prepare data directory permissions, validate Compose, then pull and start:
 
 ```bash
 sudo chown -R 1000:1000 data
 sudo chmod 600 data/DoNotStarveTogether/Cluster_1/cluster_token.txt
-# 首次先完成两个分片的安装；不需要常驻 updater。
-docker compose run --rm --no-deps master update
-docker compose run --rm --no-deps caves update
-
-master_build=$(docker compose run --rm --no-deps --entrypoint cat master /opt/dst/.build-id)
-caves_build=$(docker compose run --rm --no-deps --entrypoint cat caves /opt/dst/.build-id)
-test "$master_build" = "$caves_build"
-# 仅在上面的比较成功后启动。
+docker compose config --quiet
+docker compose pull
 docker compose up -d
 docker compose logs -f
 ```
 
-Compose 通过 `master` 服务名连接分片；UDP `10999`、`11000` 分别用于地面和洞穴玩家连接，需要在主机防火墙及路由器放行。分片通信 UDP `10888` 仅在 Docker 网络内使用，不发布到主机。Steam 内部端口在两个容器中也各自不同。
+The first startup installs the game, downloads configured mods, generates the worlds, and connects the shards. This takes some time. Messages such as `Secondary Caves(...) ready!` and `secondary shard LUA is now ready!` indicate that the shards have connected. Pressing `Ctrl+C` exits the log viewer; the server keeps running. Players can search for the name set in `cluster_name` in the game.
 
-运行已发布的镜像时，在 `.env` 设置 `DST_IMAGE=你的命名空间/镜像名:1.0.0`，然后执行 `docker compose pull` 和上述初始化步骤。启动时可使用 `docker compose up -d --no-build`。
+When no world saves exist, DST generates worlds from the configuration and writes them to `Master/save/` and `Caves/save/`. Later starts load those saves. Prepare configuration files and a token before starting; an empty data directory does not produce a complete server setup.
 
-## 命令与数据
+## Configure mods
 
-| 命令 | 行为 |
-| --- | --- |
-| `start`（默认） | 检查配置，安装/更新游戏，启动分片 |
-| `update` | 仅安装/更新游戏；首次安装或上次失败时执行 validate |
-| `update --validate` | 强制校验并修复游戏文件 |
-| `run` | 跳过 SteamCMD，启动已有完整安装；DST 仍自行更新 Mod |
+Server mods need two separate settings: **which mods to download, and which mods each shard should enable.** Complete both steps.
 
-公开配置变量只有 `CLUSTER_NAME`（默认 `Cluster_1`）和 `SHARD`（默认 `Master`，可选 `Caves`）。集群名只接受字母、数字、`_` 和 `-`。
+### 1. Add mods to the download list
 
-| 容器路径 | 内容 |
-| --- | --- |
-| `/opt/dst` | 游戏安装、SteamCMD 可写副本与缓存、Mod、`.build-id` |
-| `/data/DoNotStarveTogether/<cluster>` | `cluster.ini`、`cluster_token.txt`、分片配置与世界存档、游戏日志 |
-| `/data/.locks` | 防止同一集群分片重复运行的锁 |
-| `/config/dedicated_server_mods_setup.lua` | 可选只读 Mod 下载列表 |
+Find the numeric ID after `id=` in the mod's Steam Workshop URL. For example, `id=123456789` identifies mod `123456789`. The IDs below are placeholders; replace them with real mod IDs.
 
-默认用户 UID/GID 为 `1000:1000`。脚本不会提权或自动修改用户配置；缺文件、目录无写权限、安装被占用时会明确报错。命名 Volume 初始权限由镜像提供；宿主机 bind mount 必须自行准备所有权。
-
-安装目录锁在容器更新和运行期间始终持有。共享集群目录中的分片锁阻止另一安装目录重复启动相同分片；锁依赖文件系统对 `flock` 的支持，推荐使用本地磁盘。
-
-更新失败或中断会留下 `.update-incomplete`；`run` 不允许绕过它。再次运行 `update` 修复后才会解除标记。SteamCMD 首次使用空缓存时可能返回 `Missing configuration`；保留 Volume 并重新执行 `update`，不要删除标记后强行运行。如果持续失败，检查 Steam 连接及容器日志。
-
-### 自定义 UID/GID
-
-可使用 `docker run --user UID:GID`。Compose 可在 `compose.override.yaml` 中为两个服务设置 `user: "1234:1234"`。设置前停止服务，并准备所有权：
-
-```bash
-docker compose stop
-sudo chown -R 1234:1234 data
-# 以下一次性 root 命令只准备 Volume 权限，不运行 SteamCMD 或游戏。
-docker compose run --rm --no-deps --user 0 --entrypoint chown master -R 1234:1234 /opt/dst
-docker compose run --rm --no-deps --user 0 --entrypoint chown caves -R 1234:1234 /opt/dst
-```
-
-SteamCMD 的 HOME 位于游戏 Volume 内，因此自定义 UID 不需要写入镜像的系统目录。两个分片应使用相同 UID/GID 访问共享数据。
-
-## Workshop Mod
-
-在 `examples/dedicated_server_mods_setup.lua` 添加下载列表：
+Edit `config/dedicated_server_mods_setup.lua` in your deployment directory, adding one line per mod:
 
 ```lua
-ServerModSetup("WORKSHOP_ID")
+ServerModSetup("123456789")
+ServerModSetup("987654321")
 ```
 
-再分别编辑持久化目录中 Master 和 Caves 的 `modoverrides.lua`，启用需要的 Mod：
+The Compose configuration above mounts this file into both containers. You do not need to edit files inside the game installation. The download list is reapplied after game updates.
+
+### 2. Enable mods and configure their options
+
+Edit `data/DoNotStarveTogether/Cluster_1/Master/modoverrides.lua`:
 
 ```lua
 return {
-    ["workshop-WORKSHOP_ID"] = {
+    ["workshop-123456789"] = {
+        enabled = true,
+        configuration_options = {},
+    },
+    ["workshop-987654321"] = {
         enabled = true,
         configuration_options = {},
     },
 }
 ```
 
-下载列表与启用配置是两个步骤。更新游戏后，脚本将挂载的 Lua 文件复制到游戏 `mods/`；由 DST 自身处理 Workshop 下载，不由脚本解析 Lua。未挂载列表时使用空列表；不会自动删除已下载的缓存。`modoverrides.lua` 决定哪些 Mod 实际启用。
+The download list uses numeric strings; the keys here need the `workshop-` prefix. An empty `configuration_options = {}` uses the mod's default options. Available option names and values depend on the mod.
 
-Mod 在 DST 启动阶段更新；`update` 命令只更新服务端本体。首次 Mod 下载时间较长，参考日志等待。修改世界生成配置只影响新世界，不会自动重建现有世界。
+Configure `Caves/modoverrides.lua` as well, enabling the mods needed in the caves. If both shards should use exactly the same settings, copy the surface configuration:
 
-## 更新与退出
+```bash
+cp data/DoNotStarveTogether/Cluster_1/Master/modoverrides.lua \
+   data/DoNotStarveTogether/Cluster_1/Caves/modoverrides.lua
+```
+
+To keep options you selected in the game's UI, copy each shard's original `modoverrides.lua`, then add the required Workshop IDs to the download list. The image does not generate a download list from `modoverrides.lua`. Players install client-only mods themselves; those do not belong in the server configuration.
+
+See the [Klei mod configuration guide](https://kleiforums.com/forums/topic/96433-dedicated-server-mod-setup-guide/) for more details.
+
+### 3. Restart to apply changes
+
+```bash
+docker compose stop
+docker compose up -d
+docker compose logs -f
+```
+
+DST downloads mods and checks for mod updates during game startup. It does not reload them automatically while running. The `update` command updates only the game itself; it does not download mods in advance.
+
+To disable a mod, set `enabled = false` in each relevant shard, remove its line from the download list, and restart. Cached files can remain without enabling the mod. Back up your world before removing mods that add items or creatures.
+
+## Migrate an existing world
+
+Stop the original server first. Copy the **entire cluster directory**, including `cluster.ini`, the token, Master/Caves configuration, and their `save/` directories. Do not copy just an individual world snapshot. Keep the original as a backup.
+
+This example imports an existing `Cluster_3` as the default `Cluster_1`. Renaming the directory preserves the world progress and player data inside it.
+
+```bash
+docker compose stop
+mkdir -p data/DoNotStarveTogether
+mkdir data/DoNotStarveTogether/Cluster_1 &&
+  cp -a /path/to/Cluster_3/. data/DoNotStarveTogether/Cluster_1/
+```
+
+Replace `/path/to/Cluster_3` with your source path. The command deliberately refuses to merge into an existing `Cluster_1`. If that directory already exists, back it up and move it aside before copying, so two different worlds' saves do not get mixed together.
+
+Check the resulting structure:
+
+```text
+data/DoNotStarveTogether/Cluster_1/
+├── cluster.ini
+├── cluster_token.txt
+├── Master/
+│   ├── server.ini
+│   ├── modoverrides.lua
+│   └── save/
+└── Caves/
+    ├── server.ini
+    ├── modoverrides.lua
+    └── save/
+```
+
+Also preserve existing `leveldataoverride.lua`, `worldgenoverride.lua`, administrator lists, and other cluster files. Do not overwrite them with the new-world templates.
+
+### Adjust shard connections
+
+A server running both shards directly on one machine may use `127.0.0.1`. Here the shards run in separate containers, so adjust the connection settings in your copied configuration.
+
+Check these settings in `cluster.ini`:
+
+```ini
+[SHARD]
+shard_enabled = true
+bind_ip = 0.0.0.0
+master_ip = master
+master_port = 10888
+cluster_key = YOUR_SHARED_SHARD_KEY
+```
+
+You can keep your original `cluster_key`. Both shards read the same `cluster.ini`, so they share the key.
+
+| File | Settings to check |
+| --- | --- |
+| `Master/server.ini` | `server_port = 10999` under `[NETWORK]`; `is_master = true` under `[SHARD]` |
+| `Caves/server.ini` | `server_port = 11000` under `[NETWORK]`; `is_master = false` under `[SHARD]` |
+
+Keep the caves' original shard `id`. To retain the directory name `Cluster_3`, leave it unchanged and set `CLUSTER_NAME: Cluster_3` for **both services** in Compose. Adjust the data paths in subsequent commands accordingly.
+
+### Restore mods and start
+
+Keep your original `modoverrides.lua` files, complete the download list as described in [Configure mods](#configure-mods), and check that your token is valid. Then follow the permission and startup steps above.
+
+The startup logs should show `Loading world` as DST loads your copied saves. Moving to a container does not regenerate the world. Check the day count, characters, and buildings before players resume playing.
+
+This example assumes you have both surface and cave saves. If you only have a surface world, start just that shard with `docker compose up -d master`. Adding caves requires cave configuration and entrances in the existing surface world.
+
+## Update the game and image
+
+### How game updates work
+
+By default, every container startup checks for and installs game server updates through SteamCMD. A running server does not update on a schedule or automatically disconnect players and restart.
+
+To apply a game update, stop and start the server:
+
+```bash
+docker compose stop
+docker compose up -d
+docker compose logs -f
+```
+
+Running `docker compose up -d` while the containers are already running does not force a restart or another update check.
+
+To finish downloading the game for both shards before bringing them online, update them separately after stopping:
 
 ```bash
 docker compose stop
 docker compose run --rm --no-deps master update
 docker compose run --rm --no-deps caves update
-# 使用快速开始中的命令比较两个 .build-id，确认相同后启动。
 docker compose up -d
 ```
 
-镜像版本升级先修改 `DST_IMAGE` 并拉取镜像，然后执行上述停服更新流程。版本标签固定镜像与脚本，不固定 Volume 中的游戏版本；切换旧镜像无法回滚游戏或存档。首次安装和更新可能恰逢 Steam 发布新版本，启动日志也会打印 Build ID；若两个分片不一致，停止后再次协调更新。
+Updates preserve saves and configuration in `data`. If an update fails, the server refuses to start. Fix the connection or installation problem and retry the update; you do not need to regenerate the world. Back up saves before game version changes.
 
-Tini 为 PID 1，监督进程接收 `SIGTERM`/`SIGINT`，向游戏控制台发送 `c_shutdown()`，等待保存退出。Compose 保留 120 秒；110 秒未退出时发送 TERM，5 秒后仍未退出则 KILL。退出码保留游戏返回值。更新阶段收到停止信号会终止 SteamCMD 进程组并保留不完整标记。
+### Update the Docker Hub image
+
+To upgrade the image, stop the server, change the tag in `.env`, then pull and start again:
 
 ```bash
 docker compose stop
-# docker run 用户也应显式给予足够时间：
-docker stop --time 120 CONTAINER
+docker compose pull
+docker compose up -d --no-build
 ```
 
-只有正常完成控制台关闭才能验收为优雅退出；超时强制退出不能保证最后一次保存。镜像不提供自动备份，维护前可自行备份 `data`。
+`latest` follows the newest stable image release. An explicit tag such as `1.0.0` pins the image and startup scripts. **SteamCMD updates the game independently:** pinning the image does not pin the game version, and switching to an older image does not roll back saves.
 
-## GitHub Actions 与 Docker Hub
+For builds from source, see the [maintainer guide (Chinese)](docs/maintainer.md).
 
-将此目录提交到 GitHub 的 `main` 分支。在 Docker Hub 创建公开仓库，在 GitHub 仓库 Actions 配置：
+## Save, back up, and regenerate worlds
 
-| 类型 | 名称 | 内容 |
-| --- | --- | --- |
-| Variable | `DOCKERHUB_USERNAME` | 具有推送权限的 Docker Hub 用户名 |
-| Variable | `DOCKERHUB_REPOSITORY` | `namespace/repository` |
-| Secret | `DOCKERHUB_TOKEN` | Docker Hub 访问令牌 |
-
-PR、main 提交、手动触发只检查与构建，不访问发布凭据或推送。发布稳定标签：
+Stop the server normally to request a save and shutdown. Compose allows 120 seconds for shutdown:
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+docker compose stop
 ```
 
-发布流程验证通过后生成 `1.0.0`、`sha-<完整commit>`，以及适用的 `latest`。`latest` 只随最高稳定版本前进；补发旧版本不会回退。预发布及非法 SemVer 标签不会发布。版本与 SHA 标签存在时拒绝覆盖，因此不同版本需有各自提交，修复用新版本发布。所有 Actions 固定完整 SHA，基础镜像固定 digest。
+World saves, the token, and configuration are stored in the host's `data/` directory. They survive container recreation and `docker compose down`. Game installations and mod caches live in two Docker named volumes. `docker compose down -v` deletes those volumes, requiring another download next time, but does not delete the bind-mounted host `data/` directory.
 
-发布任务串行执行，并查询公开 Docker Hub 标签。如果标签查询失败则中止发布。请通过本工作流管理发布标签；外部手动推送不会受到该保护。Docker Hub 推送并非多标签原子事务，部分推送失败后应检查已创建标签，修复用新提交、新版本发布。
-
-工作流采用 [Docker 官方 GitHub Actions 工具](https://docs.docker.com/build/ci/github-actions/manage-tags-labels/)。镜像配置路径依据 [Klei 命令行文档](https://support.klei.com/hc/en-us/articles/360029556192-Dedicated-Server-Command-Line-Options-Guide)，控制台关闭依据 [Klei 论坛说明](https://kleiforums.com/forums/topic/51535-stopping-dedicated-server-gracefully/)。
-
-## 验证
+Automatic backups are not included. To make a backup, stop the server and archive the entire `data` directory outside the deployment directory:
 
 ```bash
-for script in scripts/*.sh tests/*.sh; do bash -n "$script"; done
-shellcheck -x scripts/*.sh tests/*.sh
-tests/runtime.sh
-tests/release.sh
-docker compose config --quiet
-docker build --platform linux/amd64 -t dst:local .
-tests/docker.sh dst:local
+docker compose stop
+tar -czf "../dst-backup-$(date +%Y%m%d-%H%M%S).tar.gz" data
+docker compose up -d
 ```
 
-替身测试覆盖安装与修复、失败标记、命令分流、锁冲突、进程组退出、存档请求、退出码及发布版本策略。Docker 测试通过真实 Tini 转发 TERM/INT，并检查 UID 1000 和自定义 UID 1234。CI 不使用真实 Token。
+**Changing world generation settings does not rebuild an existing map.** To start a fresh world, stop the server, back up the complete cluster, move both `Master/save/` and `Caves/save/` aside, adjust the generation settings, and start again. Handle both shards together to avoid mixing old and new worlds.
 
-首次公开发布前仍需有效 Token 和客户端进行实机验收：Master/Caves 联通、进入洞穴、实际 Workshop Mod 下载启用、正常停服保存、容器重建后恢复世界，以及发布镜像拉取运行。
+## Troubleshooting
 
-本项目的脚本及文档使用 MIT 许可证。DST、SteamCMD 和 Workshop Mod 遵循各自许可证。
+### Mods download but do not load
+
+Check that the affected shard's `modoverrides.lua` contains the correct `workshop-ID`, has `enabled = true`, and uses valid Lua syntax. If a mod works on the surface but not in the caves, check the cave configuration. The download list does not replace the enablement configuration.
+
+### SteamCMD reports `Missing configuration` or an update fails
+
+Keep the game volume and retry `update`. This error can occur with an empty SteamCMD cache on first use. If it persists, check connectivity to Steam and the errors in `docker compose logs master caves`.
+
+To validate and repair the game installation:
+
+```bash
+docker compose stop
+docker compose run --rm --no-deps master update --validate
+docker compose run --rm --no-deps caves update --validate
+docker compose up -d
+```
+
+### Surface and caves have different game versions
+
+This can happen if Steam releases an update between the two shards' update checks. Stop both shards and update each one. Their logged `Steam Build ID` values should match. After stopping and updating, you can compare the recorded IDs directly:
+
+```bash
+docker compose run --rm --no-deps --entrypoint cat master /opt/dst/.build-id
+docker compose run --rm --no-deps --entrypoint cat caves /opt/dst/.build-id
+```
+
+### Permission errors or a custom UID
+
+For the default user, run `sudo chown -R 1000:1000 data`. Startup does not automatically elevate privileges or change ownership of host directories.
+
+To use another user, set the same UID/GID for both services in `compose.override.yaml`, for example:
+
+```yaml
+services:
+  master:
+    user: "1234:1234"
+  caves:
+    user: "1234:1234"
+```
+
+Stop the server, then adjust ownership of both the data directory and game volumes:
+
+```bash
+docker compose stop
+sudo chown -R 1234:1234 data
+docker compose run --rm --no-deps --user 0 --entrypoint chown master -R 1234:1234 /opt/dst
+docker compose run --rm --no-deps --user 0 --entrypoint chown caves -R 1234:1234 /opt/dst
+docker compose up -d
+```
+
+These root commands only prepare volume permissions. The game and SteamCMD still run as the specified non-root user.
+
+### Temporarily skip game updates
+
+Once the game is fully installed, set `command: ["run"]` for both services in `compose.override.yaml` to skip SteamCMD on startup. DST still checks for mod updates. To restore automatic game updates, remove that setting and recreate the containers.
+
+---
+
+For publishing, development checks, and implementation details, see the [maintainer guide (Chinese)](docs/maintainer.md). Project scripts and documentation are MIT licensed; DST, SteamCMD, and Workshop mods retain their respective licenses.
