@@ -24,7 +24,7 @@ ENV CLUSTER_NAME=Cluster_1 SHARD=Master HOME=/opt/dst/.home LANG=en_US.UTF-8
 USER 1000:1000
 WORKDIR /opt/dst
 VOLUME ["/opt/dst", "/data"]
-EXPOSE 10999/udp 11000/udp
+EXPOSE 10999/udp 10998/udp
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/lib/dst/entrypoint.sh"]
 CMD ["start"]

@@ -3,7 +3,9 @@ set -Eeuo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 test_root=$(mktemp -d)
 runner=
+other_runner=
 cleanup() {
+    if [[ -n $other_runner ]]; then kill -TERM "$other_runner" 2>/dev/null || true; wait "$other_runner" 2>/dev/null || true; fi
     if [[ -n $runner ]]; then kill -TERM "$runner" 2>/dev/null || true; wait "$runner" 2>/dev/null || true; fi
     rm -rf "$test_root"
 }
@@ -19,8 +21,23 @@ printf 'ServerModSetup("123456")\n' >"$MODS_SETUP"
 cat >"$test_root/fake-game" <<'MOCK'
 #!/usr/bin/env bash
 set -eu
+if [[ $* == *-only_update_server_mods* ]]; then
+    printf '%s\n' "$@" >"$TEST_ROOT/mod-update-args"
+    [[ ${MOCK_MOD_FAIL:-0} != 1 ]] || exit 41
+    if [[ ${MOCK_MOD_FAIL:-0} == 2 ]]; then printf '[Workshop] ODPF failed entirely: 16\n'; exit 0; fi
+    if [[ ${MOCK_MOD_BLOCK:-0} == 1 ]]; then
+        trap 'exit 143' TERM
+        sleep 100 &
+        printf '%s\n' "$!" >"$TEST_ROOT/mod-child"
+        touch "$TEST_ROOT/mod-ready"
+        wait "$!"
+    fi
+    mkdir -p "$DST_ROOT/mods/workshop-123456"
+    printf 'return {}\n' >"$DST_ROOT/mods/workshop-123456/modmain.lua"
+    exit 0
+fi
 printf '%s\n' "$@" >"$TEST_ROOT/game-args"
-touch "$TEST_ROOT/game-ready"
+touch "$TEST_ROOT/game-ready${MOCK_TAG:-}"
 trap 'echo unexpected-term >>"$TEST_ROOT/game-signals"; exit 99' TERM INT
 while IFS= read -r command; do
     if [[ $command == 'c_shutdown()' ]]; then
@@ -90,6 +107,8 @@ cmp "$MODS_SETUP" "$DST_ROOT/mods/dedicated_server_mods_setup.lua"
 if rg -q '^validate$' "$test_root/update-args"; then fail 'Ordinary update unexpectedly validates'; fi
 "$entry" update --validate >"$test_root/log" 2>&1
 rg -q '^validate$' "$test_root/update-args" || fail 'Explicit repair must validate'
+rg -q '^-only_update_server_mods$' "$test_root/mod-update-args" || fail 'Mod updater did not run'
+[[ -s $DST_ROOT/.mods-ready ]] || fail 'Missing mod readiness marker'
 pass 'first install, update, repair and mod setup'
 
 expect_failure env MOCK_STATE=0 "$entry" update
@@ -150,6 +169,39 @@ kill -TERM "$runner"
 finish_runner 0
 pass 'start routes through updater'
 
+# Both shards must read the same installation concurrently, while writers fail.
+mkdir -p "$DATA_ROOT/DoNotStarveTogether/Cluster_1/Caves"
+cp "$repo/examples/cluster/Caves/server.ini" "$DATA_ROOT/DoNotStarveTogether/Cluster_1/Caves/"
+rm "$test_root/game-ready"
+"$entry" run >"$test_root/master-log" 2>&1 &
+runner=$!
+await_file "$test_root/game-ready"
+MOCK_TAG=-caves SHARD=Caves "$entry" run >"$test_root/caves-log" 2>&1 &
+other_runner=$!
+await_file "$test_root/game-ready-caves"
+expect_failure "$entry" update
+rg -q 'stop all shards' "$test_root/failure-log" || fail 'Update was not blocked by readers'
+kill -TERM "$runner"
+finish_runner 0
+expect_failure "$entry" update
+kill -TERM "$other_runner"
+wait "$other_runner"
+other_runner=
+rg -q '^-skip_update_server_mods$' "$test_root/game-args" || fail 'Shard could download mods'
+rg -q -- '-ugc_directory' "$test_root/game-args" || fail 'Shared UGC directory missing'
+pass 'two shards share installation, block updates until both exit, skip mod downloads'
+
+expect_failure env MOCK_MOD_FAIL=1 "$entry" update
+expect_failure env MOCK_MOD_FAIL=2 "$entry" update
+[[ -e $DST_ROOT/.mods-incomplete && ! -e $DST_ROOT/.mods-ready ]] || fail 'Failed mod update must block run'
+expect_failure "$entry" run
+"$entry" update >"$test_root/log" 2>&1
+printf 'ServerModSetup("999999")\n' >>"$MODS_SETUP"
+expect_failure "$entry" run
+rg -q 'download list changed' "$test_root/failure-log" || fail 'Changed mod list was not detected'
+"$entry" update >"$test_root/log" 2>&1
+pass 'failed or changed shared mods block startup until repaired'
+
 MOCK_BLOCK=1 "$entry" update >"$test_root/update-log" 2>&1 &
 runner=$!
 await_file "$test_root/update-ready"
@@ -159,6 +211,19 @@ finish_runner 143
 child_pid=$(cat "$test_root/update-child")
 if kill -0 "$child_pid" 2>/dev/null; then fail 'Update child leaked'; fi
 pass 'update stop terminates process group'
+
+MOCK_MOD_BLOCK=1 "$entry" update >"$test_root/mod-block-log" 2>&1 &
+runner=$!
+await_file "$test_root/mod-ready"
+expect_failure env SHARD=Caves "$entry" run
+rg -q 'being updated' "$test_root/failure-log" || fail 'Reader entered during update'
+kill -TERM "$runner"
+finish_runner 143
+[[ -e $DST_ROOT/.mods-incomplete && ! -e $DST_ROOT/.mods-ready ]] || fail 'Interrupted mod update became runnable'
+child_pid=$(cat "$test_root/mod-child")
+if kill -0 "$child_pid" 2>/dev/null; then fail 'Mod updater child leaked'; fi
+"$entry" update >"$test_root/log" 2>&1
+pass 'mod update stop terminates process group, blocks readers, preserves incomplete state'
 
 "$entry" update >"$test_root/log" 2>&1
 rm "$MODS_SETUP"

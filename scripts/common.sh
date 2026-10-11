@@ -16,6 +16,7 @@ stop_requested=0
 console_dir=
 shutdown_timer=
 shutdown_sent=0
+runtime_home=
 
 log() { printf '[dst] %s\n' "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -26,10 +27,17 @@ validate_identity() {
 }
 
 lock_install() {
-    mkdir -p "$DST_ROOT" || die 'Cannot create /opt/dst; check Volume ownership'
-    [[ -w $DST_ROOT ]] || die 'Game Volume is not writable; prepare ownership for the container UID/GID'
-    exec {install_lock}>"$DST_ROOT/.lifecycle.lock"
-    flock -n "$install_lock" || die 'Game Volume is busy: stop the container before updating'
+    local mode=${1:-exclusive}
+    if [[ $mode == shared ]]; then
+        [[ -r $DST_ROOT/.lifecycle.lock ]] || die 'Shared installation is not prepared; run update first'
+        exec {install_lock}<"$DST_ROOT/.lifecycle.lock"
+        flock -s -n "$install_lock" || die 'Game Volume is being updated; wait for update to finish'
+    else
+        mkdir -p "$DST_ROOT" || die 'Cannot create /opt/dst; check Volume ownership'
+        [[ -w $DST_ROOT ]] || die 'Game Volume is not writable; prepare ownership for the container UID/GID'
+        exec {install_lock}>"$DST_ROOT/.lifecycle.lock"
+        flock -n "$install_lock" || die 'Game Volume is busy: stop all shards before updating'
+    fi
 }
 
 validate_config() {
@@ -65,6 +73,31 @@ sync_mods() {
     else
         printf '%s\n' '-- No Workshop mods configured.' >"$DST_ROOT/mods/dedicated_server_mods_setup.lua"
     fi
+}
+
+mods_signature() {
+    if [[ -e $MODS_SETUP ]]; then
+        [[ -f $MODS_SETUP && -r $MODS_SETUP ]] || die 'Mod setup must be a readable Lua file'
+        sha256sum <"$MODS_SETUP"
+    else
+        printf '%s\n' '-- No Workshop mods configured.' | sha256sum
+    fi
+}
+
+validate_mods() {
+    [[ ! -e $DST_ROOT/.mods-incomplete && -s $DST_ROOT/.mods-ready ]] \
+        || die 'Shared mods are not prepared; stop all shards and run update'
+    [[ $(mods_signature) == "$(cat "$DST_ROOT/.mods-ready")" ]] \
+        || die 'Mod download list changed; stop all shards and run update'
+}
+
+prepare_runtime_home() {
+    # Game/Steam runtime files belong to this process, never to the shared install.
+    runtime_home=$(mktemp -d)
+    mkdir -p "$runtime_home/.steam"
+    ln -s "$DST_ROOT/.steamcmd/linux32" "$runtime_home/.steam/sdk32"
+    ln -s "$DST_ROOT/.steamcmd/linux64" "$runtime_home/.steam/sdk64"
+    export HOME="$runtime_home"
 }
 
 arm_kill_timer() {
@@ -133,5 +166,6 @@ cleanup() {
         wait "$shutdown_timer" 2>/dev/null || true
     fi
     [[ -z $console_dir ]] || rm -rf "$console_dir"
+    [[ -z $runtime_home ]] || rm -rf "$runtime_home"
     exit "$status"
 }

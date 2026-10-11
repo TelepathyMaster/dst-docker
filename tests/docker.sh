@@ -5,8 +5,13 @@ image=${1:-dst:local}
 test_root=$(mktemp -d)
 test_image="dst-runtime-test:$$"
 container=
+other_container=
+shared_game="dst-shared-fixture-game-$$"
+shared_data="dst-shared-fixture-data-$$"
 cleanup() {
+    [[ -z $other_container ]] || docker rm -f -v "$other_container" >/dev/null 2>&1 || true
     [[ -z $container ]] || docker rm -f -v "$container" >/dev/null 2>&1 || true
+    docker volume rm "$shared_game" "$shared_data" >/dev/null 2>&1 || true
     docker image rm "$test_image" >/dev/null 2>&1 || true
     rm -rf "$test_root"
 }
@@ -39,6 +44,8 @@ done
 exit 98
 EOF_GAME
 chmod +x "$test_root/game/bin64/dontstarve_dedicated_server_nullrenderer_x64"
+touch "$test_root/game/.lifecycle.lock"
+printf '%s\n' '-- No Workshop mods configured.' | sha256sum >"$test_root/game/.mods-ready"
 cat >"$test_root/Dockerfile" <<'EOF_DOCKER'
 ARG DST_IMAGE
 FROM ${DST_IMAGE}
@@ -72,3 +79,29 @@ for fixture_uid in 1000 1234; do
         printf 'PASS Docker %s shutdown saves with UID %s and preserves exit code\n' "$signal" "$fixture_uid"
     done
 done
+
+# Seed one installation and run two containers with read-only mounts of it.
+docker run --rm --user 0 --entrypoint bash -v "$shared_game:/opt/dst" -v "$shared_data:/data" "$test_image" -c true
+container=$(docker run -d -v "$shared_game:/opt/dst:ro" -v "$shared_data:/data" "$test_image" run)
+other_container=$(docker run -d -e SHARD=Caves -v "$shared_game:/opt/dst:ro" -v "$shared_data:/data" "$test_image" run)
+for running in "$container" "$other_container"; do
+    ready=false
+    for (( attempt=0; attempt<100; attempt++ )); do
+        if docker logs "$running" 2>&1 | rg -q FIXTURE_READY; then ready=true; break; fi
+        sleep 0.05
+    done
+    [[ $ready == true ]] || { docker logs "$running"; exit 1; }
+done
+if docker run --rm -v "$shared_game:/opt/dst" -v "$shared_data:/data" "$test_image" update >"$test_root/busy-log" 2>&1; then
+    echo 'Updater modified an installation with running shards' >&2; exit 1
+fi
+rg -q 'stop all shards' "$test_root/busy-log"
+for running in "$container" "$other_container"; do
+    docker stop -t 15 "$running" >/dev/null
+    [[ $(docker inspect "$running" --format '{{.State.ExitCode}}') == 17 ]]
+    docker logs "$running" 2>&1 | rg -q FIXTURE_SAVED
+done
+docker rm -v "$container" "$other_container" >/dev/null
+container=
+other_container=
+printf 'PASS Docker two read-only shards share one installation and exclude updater\n'

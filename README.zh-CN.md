@@ -1,9 +1,14 @@
 # DST Docker
 
-[English](README.md)
-用 Docker 运行饥荒联机版专用服务器，支持地面（Master）和洞穴（Caves）。可以从零生成新世界，也可以搬入已有存档继续玩。首次启动会下载游戏服务端，以后每次启动都会检查更新，无需另外运行一个更新容器。
+[![GitHub](https://img.shields.io/badge/GitHub-Source-181717?logo=github&logoColor=white)](https://github.com/TelepathyMaster/dst-docker)
 
-需要 Linux x86_64（`linux/amd64`）、Docker Engine 和 Docker Compose。地面、洞穴各自保存一份游戏文件，请预留约 10 GB 以上空间，另加存档和 Mod 的空间。服务器需要能够连接 Steam 和 Klei。
+[English](README.md)
+
+Docker Hub：[srtkz/dst-dedicated-server](https://hub.docker.com/r/srtkz/dst-dedicated-server)。本指南对应 **v1.1.0**，镜像地址为 `srtkz/dst-dedicated-server:1.1.0`。
+
+用 Docker 运行饥荒联机版专用服务器，支持地面（Master）和洞穴（Caves）。可以从零生成新世界，也可以搬入已有存档继续玩。由 updater 服务统一下载和更新游戏及 Mod，地面与洞穴只读共用同一份安装文件。
+
+需要 Linux x86_64（`linux/amd64`）、Docker Engine 和 Docker Compose。请为一份游戏安装、共享 Mod 以及各分片存档预留空间。服务器需要能够连接 Steam 和 Klei。
 
 - [第一次开服](#第一次开服)
 - [配置 Mod](#配置-mod)
@@ -11,6 +16,8 @@
 - [更新游戏和镜像](#更新游戏和镜像)
 - [保存、备份和重新生成世界](#保存备份和重新生成世界)
 - [常见问题](#常见问题)
+
+从 `1.1.0` 起，游戏和 Mod 使用共享安装方案。`1.0.0` 镜像采用旧的双数据卷布局，不兼容下面的 Compose 示例。已有部署请按[迁移已有存档](#迁移已有存档)中的说明升级。
 
 ## 第一次开服
 
@@ -23,74 +30,91 @@ mkdir dst-server
 cd dst-server
 ```
 
-新建 `.env`，填写要使用的 Docker Hub 镜像及标签：
-
-```dotenv
-DST_IMAGE=your-namespace/your-image:1.0.0
-```
-
-这里的地址是占位值，需替换为实际已发布的镜像和标签。然后新建 `compose.yml`：
+新建 `compose.yml`，在 `x-dst` 下直接填写 Docker Hub 镜像地址和标签：
 
 ```yaml
 x-dst: &dst
-  image: ${DST_IMAGE:?Set DST_IMAGE in .env}
-  platform: linux/amd64
-  restart: unless-stopped
+  image: srtkz/dst-dedicated-server:1.1.0
   stop_grace_period: 120s
   networks: [dst]
+  environment: &dst-environment
+    CLUSTER_NAME: Cluster_1
 
 services:
-  master:
+  updater:
     <<: *dst
+    restart: "no"
+    command: update
     environment:
-      CLUSTER_NAME: Cluster_1
+      <<: *dst-environment
       SHARD: Master
     volumes:
-      - master-game:/opt/dst
+      - dst-game:/opt/dst
+      - ./data:/data
+      - ./config/dedicated_server_mods_setup.lua:/config/dedicated_server_mods_setup.lua:ro
+  master:
+    <<: *dst
+    restart: unless-stopped
+    command: run
+    depends_on:
+      updater:
+        condition: service_completed_successfully
+    environment:
+      <<: *dst-environment
+      SHARD: Master
+    volumes:
+      - dst-game:/opt/dst:ro
       - ./data:/data
       - ./config/dedicated_server_mods_setup.lua:/config/dedicated_server_mods_setup.lua:ro
     ports:
       - "10999:10999/udp"
   caves:
     <<: *dst
+    restart: unless-stopped
+    command: run
+    depends_on:
+      updater:
+        condition: service_completed_successfully
     environment:
-      CLUSTER_NAME: Cluster_1
+      <<: *dst-environment
       SHARD: Caves
     volumes:
-      - caves-game:/opt/dst
+      - dst-game:/opt/dst:ro
       - ./data:/data
       - ./config/dedicated_server_mods_setup.lua:/config/dedicated_server_mods_setup.lua:ro
     ports:
-      - "11000:11000/udp"
+      - "10998:10998/udp"
 
 volumes:
-  master-game:
-  caves-game:
+  dst-game:
 networks:
   dst:
     driver: bridge
 ```
 
+`x-dst` 保存公共服务配置，其中的 `environment` 另设 `&dst-environment` 锚点。各服务通过 `<<: *dst-environment` 合并公共环境变量，再设置自己的 `SHARD`。YAML 的合并不会递归处理嵌套映射：只继承 `*dst` 时，服务自己的 `environment` 会覆盖整个公共环境变量配置。因此，修改集群名只需改公共环境变量中的一处 `CLUSTER_NAME`。
+
 先按自己的部署环境检查这些配置项：
 
 | 配置项 | 用途与修改方式 |
 | --- | --- |
-| `image` / `.env` 中的 `DST_IMAGE` | Docker Hub 镜像地址和标签；两个服务使用同一版本 |
-| `CLUSTER_NAME` | `/data/DoNotStarveTogether/` 下的集群目录名；两个服务必须一致，默认 `Cluster_1` |
+| `image` | Docker Hub 镜像地址和标签；三个服务使用同一镜像 |
+| `CLUSTER_NAME` | `/data/DoNotStarveTogether/` 下的集群目录名；在 `x-dst.environment` 中统一设置，默认 `Cluster_1` |
 | `SHARD` | 对应集群中的分片目录，分别为 `Master` 和 `Caves` |
-| `./data:/data` | 将本地配置、Token 和世界存档挂载到容器；两个服务共享同一目录 |
-| `master-game:/opt/dst`、`caves-game:/opt/dst` | 各自保存游戏安装和 Mod 缓存，两个分片使用独立 Volume |
-| `./config/dedicated_server_mods_setup.lua:…:ro` | 将本地 Mod 下载列表只读挂载到两个容器，启动前需创建该文件 |
+| `./data:/data` | 将本地配置、Token 和世界存档挂载到容器；三个服务共享同一目录 |
+| `dst-game:/opt/dst` | 共用一份游戏和 Mod；updater 可写，两个分片只读挂载 |
+| `depends_on` | updater 成功退出后才启动分片，更新失败时阻止启动 |
+| `./config/dedicated_server_mods_setup.lua:…:ro` | 将本地 Mod 下载列表只读挂载到三个容器，启动前需创建该文件 |
 | `ports` | `宿主机端口:容器端口/udp`；容器端口对应下文 `server.ini` 中的 `server_port` |
 | `networks` | 让洞穴通过服务名 `master` 连接地面，对应 `cluster.ini` 的 `master_ip = master` |
 | `stop_grace_period` | 正常关闭时等待保存的时间，保留 `120s` |
 | `restart` | `unless-stopped` 会在异常退出后重启；手动停服后保持停止 |
 
-下面按默认路径和端口继续。若修改了 `CLUSTER_NAME` 或 `./data` 的挂载来源，后面的文件路径也要对应调整。需要外网玩家加入时，在防火墙和路由器放行两个宿主机 UDP 端口；默认是 `10999` 和 `11000`。分片连接端口 `10888` 只在 Docker 网络内使用。
+下面按默认路径和端口继续。若修改了 `CLUSTER_NAME` 或 `./data` 的挂载来源，后面的文件路径也要对应调整。需要外网玩家加入时，在防火墙和路由器放行两个宿主机 UDP 端口；默认是 `10999` 和 `10998`。分片连接端口 `10888` 只在 Docker 网络内使用。
 
 ### 2. 准备世界配置和 Token
 
-已有存档时，按[迁移已有存档](#迁移已有存档)放好整个集群，再回来执行“拉取镜像并启动”。新世界按下面的结构创建文件：
+已有存档时，按[迁移已有存档](#迁移已有存档)放好整个集群，再回来执行“准备安装并启动”。新世界按下面的结构创建文件：
 
 ```bash
 mkdir -p data/DoNotStarveTogether/Cluster_1/{Master,Caves} config
@@ -100,7 +124,6 @@ printf '%s\n' '-- No Workshop mods configured.' > config/dedicated_server_mods_s
 ```text
 dst-server/
 ├── compose.yml
-├── .env
 ├── config/
 │   └── dedicated_server_mods_setup.lua
 └── data/DoNotStarveTogether/Cluster_1/
@@ -165,7 +188,7 @@ master_server_port = 27016
 
 ```ini
 [NETWORK]
-server_port = 11000
+server_port = 10998
 
 [SHARD]
 is_master = false
@@ -205,9 +228,9 @@ return {}
 
 想调整地图大小、资源等选项，在**第一次启动之前**修改对应的 `worldgenoverride.lua`，也可以使用游戏导出的世界配置。格式可参考 [Klei 世界设置指南](https://kleiforums.com/forums/topic/67039-dedicated-server-world-overrides-guide/)。需要 Mod 时，按[配置 Mod](#配置-mod)填写下载列表和各分片的启用配置。
 
-### 3. 拉取镜像并启动
+### 3. 准备安装并启动
 
-容器默认以 UID/GID `1000:1000` 运行，先准备数据目录权限，再检查 Compose、拉取镜像并启动：
+容器默认以 UID/GID `1000:1000` 运行，先准备数据目录权限，再检查 Compose、准备安装并启动：
 
 ```bash
 sudo chown -R 1000:1000 data
@@ -218,7 +241,7 @@ docker compose up -d
 docker compose logs -f
 ```
 
-首次启动会依次安装游戏、下载配置的 Mod、生成世界，再连接地面和洞穴，需要一些时间。日志中出现 `Secondary Caves(...) ready!`、`secondary shard LUA is now ready!`，表示两个分片已完成连接。按 `Ctrl+C` 只退出日志查看，服务器继续运行。玩家可在游戏中搜索 `cluster_name` 设置的房间名称加入。
+首次启动由 updater 安装一份游戏、下载配置的 Mod 后退出；随后两个分片加载共享文件，各自生成世界并连接，需要一些时间。日志中出现 `Secondary Caves(...) ready!`、`secondary shard LUA is now ready!`，表示两个分片已完成连接。按 `Ctrl+C` 只退出日志查看，服务器继续运行。玩家可在游戏中搜索 `cluster_name` 设置的房间名称加入。
 
 没有世界存档时，DST 根据配置生成世界，写入 `Master/save/` 和 `Caves/save/`；以后启动继续加载这些存档。配置和 Token 需提前准备，空的数据目录不会自动生成完整开服配置。
 
@@ -237,7 +260,15 @@ ServerModSetup("123456789")
 ServerModSetup("987654321")
 ```
 
-上面的 Compose 已经把这个文件挂载到两个容器，无需进入容器编辑游戏安装目录。游戏本体更新后，这份下载列表仍会重新应用。
+也可以使用 `ServerModCollectionSetup` 下载 Steam 创意工坊合集中的 Mod，参数是合集页面地址中 `id=` 后面的数字 ID：
+
+```lua
+ServerModCollectionSetup("COLLECTION_ID")
+```
+
+将 `COLLECTION_ID` 替换为实际的数字合集 ID。同一个文件中可以混用合集和单个 Mod 的下载配置。合集只负责下载，仍需在各分片的 `modoverrides.lua` 中逐个启用并配置 Mod，使用单个 Mod 的 ID，而不是合集 ID。已下载但未配置启用的 Mod 不会运行。合集新增 Mod 后，重新运行 updater 下载，并按需补充启用配置。
+
+上面的 Compose 已经把这个文件挂载到三个容器，无需进入容器编辑游戏安装目录。游戏本体更新后，这份下载列表仍会重新应用。
 
 ### 2. 在分片中启用并设置选项
 
@@ -277,11 +308,13 @@ docker compose up -d
 docker compose logs -f
 ```
 
-Mod 会在 DST 启动阶段下载和检查更新，服务器运行期间不会自动重新加载。`update` 命令只更新游戏本体，不会提前完成 Mod 下载。
+updater 使用 `-only_update_server_mods` 统一准备 Mod 文件；两个分片使用 `-skip_update_server_mods` 和同一个 UGC 目录，不再重复下载。更新游戏或 Mod 前必须停止两个分片，`update` 现在会同时准备游戏和 Mod。
 
 停用某个 Mod 时，将各相关分片中的 `enabled` 改为 `false`，并从下载列表中移除对应行，再重启。缓存文件可以保留，不会因此继续启用。移除会添加物品或生物的 Mod 前，先备份世界存档。
 
 ## 迁移已有存档
+
+从旧版双数据卷方案迁移时，先停止旧服务并备份 `data`，再替换 Compose 布局并使用兼容的新镜像。新 `dst-game` 卷由 updater 下载准备一次；存档和配置仍来自原 `data`。旧 `master-game`、`caves-game` 卷不会自动合并或删除，验收通过前保留，之后只清理已确认不用的卷。
 
 先停止原服务器，复制**整个集群目录**，包括 `cluster.ini`、Token、Master/Caves 配置和各自的 `save/`，不要只复制单个世界快照。建议保留原存档作为备份。
 
@@ -334,9 +367,9 @@ cluster_key = 你自己的分片连接密钥
 | 文件 | 需要确认的设置 |
 | --- | --- |
 | `Master/server.ini` | `[NETWORK]` 的 `server_port = 10999`；`[SHARD]` 的 `is_master = true` |
-| `Caves/server.ini` | `[NETWORK]` 的 `server_port = 11000`；`[SHARD]` 的 `is_master = false` |
+| `Caves/server.ini` | `[NETWORK]` 的 `server_port = 10998`；`[SHARD]` 的 `is_master = false` |
 
-保留洞穴原有的分片 `id`。如果要使用 `Cluster_3` 这个目录名，可以不重命名，并将 Compose 中**两个服务**的 `CLUSTER_NAME` 都改为 `Cluster_3`；后续命令中的数据路径也对应替换。
+保留洞穴原有的分片 `id`。如果要使用 `Cluster_3` 这个目录名，可以不重命名，并将 Compose 中 `x-dst.environment` 下的 `CLUSTER_NAME` 改为 `Cluster_3`；后续命令中的数据路径也对应替换。
 
 ### 恢复 Mod 并开服
 
@@ -350,7 +383,7 @@ cluster_key = 你自己的分片连接密钥
 
 ### 游戏本体如何更新
 
-默认模式下，每次容器启动都会通过 SteamCMD 检查并更新游戏服务端。正在运行的服务器不会定时更新，也不会自动踢出玩家重启。
+默认由 Compose 的 updater 在两个分片启动前统一更新游戏和 Mod。正在运行的服务器不会定时更新，也不会自动踢出玩家重启。
 
 有游戏更新时，正常停服再启动即可：
 
@@ -360,22 +393,23 @@ docker compose up -d
 docker compose logs -f
 ```
 
-只在服务器已经运行时再次执行 `docker compose up -d`，不会强制重启，也不会重新检查更新。
+运行 updater 前应先停止两个分片。分片仍在运行时执行 `docker compose up -d` 可能重新启动已退出的 updater；独占锁会拒绝修改正在使用的安装。
 
-想先完成两个分片的游戏下载，再一起开服，可以在停服后单独更新：
+想先完成共享游戏和 Mod 更新，再一起开服，可以在停服后只更新一次，再跳过 updater 启动分片：
 
 ```bash
 docker compose stop
-docker compose run --rm --no-deps master update
-docker compose run --rm --no-deps caves update
-docker compose up -d
+docker compose run --rm --no-deps updater update
+docker compose up -d --no-deps master caves
 ```
 
 更新会保留 `data` 中的存档和配置。若更新失败，服务器会停止启动，修复连接或安装问题后重新更新即可，不需要重建世界。更换游戏版本前建议备份存档。
 
 ### 更新 Docker Hub 镜像
 
-升级镜像时，先停服，修改 `.env` 中的标签，再拉取并启动：
+此共享安装布局使用 `1.1.0` 或后续兼容版本，不能使用 `1.0.0` 镜像。
+
+升级镜像时，先停服，修改 `compose.yml` 中 `x-dst` 下的 `image`，再拉取并启动：
 
 ```bash
 docker compose stop
@@ -383,7 +417,7 @@ docker compose pull
 docker compose up -d --no-build
 ```
 
-`latest` 跟随最新稳定镜像，`1.0.0` 这样的明确标签固定镜像和启动脚本版本。**游戏本体仍由 SteamCMD 独立更新**，固定镜像标签不等于固定游戏版本，换回旧镜像也不能回滚存档。
+`latest` 跟随最新稳定镜像，`1.1.0` 这样的明确标签固定镜像和启动脚本版本。**游戏本体仍由 SteamCMD 独立更新**，固定镜像标签不等于固定游戏版本，换回旧镜像也不能回滚存档。
 
 需要从源码构建镜像时，参阅[维护者文档](docs/maintainer.md)。
 
@@ -395,7 +429,7 @@ docker compose up -d --no-build
 docker compose stop
 ```
 
-世界存档、Token 和配置都在宿主机的 `data/` 中。重建容器或执行 `docker compose down` 后，它们仍然保留。地面、洞穴的游戏文件和 Mod 缓存在两个 Docker 命名 Volume 中；`docker compose down -v` 会清掉这些缓存，下次启动需要重新下载，但不会删除挂载的宿主机 `data/`。
+世界存档、Token 和配置都在宿主机的 `data/` 中。重建容器或执行 `docker compose down` 后，它们仍然保留。游戏文件和 Mod 缓存在一个共享 Docker 命名 Volume 中；`docker compose down -v` 会清掉这些缓存，下次启动需要重新下载，但不会删除挂载的宿主机 `data/`。
 
 项目不提供自动备份。可以停服后打包整个 `data`，将备份放在部署目录外：
 
@@ -421,49 +455,48 @@ docker compose up -d
 
 ```bash
 docker compose stop
-docker compose run --rm --no-deps master update --validate
-docker compose run --rm --no-deps caves update --validate
+docker compose run --rm --no-deps updater update --validate
 docker compose up -d
 ```
 
 ### 地面和洞穴版本不一致
 
-Steam 恰好在两个分片更新之间发布新版时，可能出现这种情况。先停止两个分片，再分别更新；日志中的 `Steam Build ID` 应一致。需要精确比较时，可在停服更新后查看：
+两个分片加载同一游戏卷，因此 Build ID 相同。如仍出现版本差异，检查是否使用相同镜像和数据卷。通过 updater 更新前应停止两个分片。
 
-```bash
-docker compose run --rm --no-deps --entrypoint cat master /opt/dst/.build-id
-docker compose run --rm --no-deps --entrypoint cat caves /opt/dst/.build-id
-```
+### 洞穴提示 `CANNOT_RESOLVE_DOMAIN_NAME`
+
+检查洞穴日志中的 `MasterHost`。使用此 Compose 时，实际部署的 `cluster.ini` 中 `[SHARD]` 的 `master_ip` 应为地表服务名 `master`；旧存档中的 `dst_master` 等地址可能无法解析。两个服务也应位于同一 `dst` 网络。先停服，修正副本中的配置，再启动。若此错误后出现退出码 139 的重启循环，应先解决分片连接失败；修正后仍崩溃再检查完整日志。
 
 ### 目录权限不足，或者想换一个 UID
 
 默认先执行 `sudo chown -R 1000:1000 data`。容器启动时不会自动提权或修改宿主机目录所有权。
 
-需要自定义用户时，在 `compose.override.yaml` 中为两个服务设置同一组 UID/GID，例如：
+需要自定义用户时，在 `compose.override.yaml` 中为三个服务设置同一组 UID/GID，例如：
 
 ```yaml
 services:
+  updater:
+    user: "1234:1234"
   master:
     user: "1234:1234"
   caves:
     user: "1234:1234"
 ```
 
-停服后，将数据目录和游戏 Volume 的所有权一起调整：
+停服后，将数据目录和共享游戏 Volume 的所有权一起调整：
 
 ```bash
 docker compose stop
 sudo chown -R 1234:1234 data
-docker compose run --rm --no-deps --user 0 --entrypoint chown master -R 1234:1234 /opt/dst
-docker compose run --rm --no-deps --user 0 --entrypoint chown caves -R 1234:1234 /opt/dst
+docker compose run --rm --no-deps --user 0 --entrypoint chown updater -R 1234:1234 /opt/dst
 docker compose up -d
 ```
 
 这里的 root 命令只用于准备 Volume 权限；游戏和 SteamCMD 仍以指定的普通用户运行。
 
-### 暂时不想更新游戏本体
+### 暂时不想更新游戏和 Mod
 
-已完整安装游戏后，可以在 `compose.override.yaml` 中为两个服务设置 `command: ["run"]`，以后启动跳过 SteamCMD。Mod 仍由 DST 在启动时检查更新。恢复默认自动更新时，移除这项设置并重新创建容器。
+完成一次准备后，执行 `docker compose up -d --no-deps master caves`，只启动两个分片，使用现有共享游戏和 Mod。需要重新检查更新时，按正常停服再启动流程运行 updater。
 
 ---
 

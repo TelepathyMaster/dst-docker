@@ -18,9 +18,9 @@ esac
 validate_identity
 trap stop_child TERM INT
 trap cleanup EXIT
-lock_install
+if [[ $command == run ]]; then lock_install shared; else lock_install; fi
 case "$command" in
-    start) validate_config; update_game; run_game ;;
-    update) update_game "${1:-}" ;;
+    start) validate_config; update_game; update_mods; flock -s "$install_lock"; run_game ;;
+    update) validate_config; update_game "${1:-}"; update_mods ;;
     run) validate_config; run_game ;;
 esac

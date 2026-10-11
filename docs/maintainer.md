@@ -30,14 +30,16 @@ docker compose logs -f
 
 | 命令 | 行为 |
 | --- | --- |
-| `start`（默认） | 检查配置，安装或更新游戏，再运行分片 |
-| `update` | 仅安装或更新游戏，首次安装自动校验 |
+| `start`（默认） | 单容器更新游戏和 Mod，再转为共享锁运行；Compose 使用独立 updater |
+| `update` | 持独占锁，安装或更新游戏和共享 Mod，然后退出；需要集群配置和 Token |
 | `update --validate` | 更新并校验安装文件 |
-| `run` | 跳过 SteamCMD，运行已安装游戏 |
+| `run` | 持共享锁，跳过游戏及 Mod 更新，运行已准备的安装 |
 
 环境变量为 `CLUSTER_NAME=Cluster_1`、`SHARD=Master`，首版支持 `Master` 与 `Caves`。`/opt/dst` 保存游戏安装和 Mod 缓存，`/data` 保存集群配置、Token 和存档，`/config/dedicated_server_mods_setup.lua` 为可选的只读下载列表。
 
-默认 UID/GID 为 `1000:1000`，支持指定用户运行，权限不足时报错。入口脚本对游戏安装目录及分片持锁，阻止运行时覆盖安装文件或重复启动；更新失败后留下标记，禁止直接运行未完成的安装。
+默认 UID/GID 为 `1000:1000`，支持指定用户运行，权限不足时报错。安装目录采用读写锁：updater 独占，两个运行分片共享；分片自身另持独占锁。更新失败留下标记，Mod 下载列表变化也会拒绝直接运行。Compose 仅 updater 可写游戏卷，分片只读挂载。运行时 HOME 是每进程的临时目录，Steam 运行文件不会写进共享安装。
+
+Mod 统一使用 `-only_update_server_mods -ugc_directory /opt/dst/ugc_mods` 准备，分片使用 `-skip_update_server_mods` 和相同 UGC 目录。Klei 开发者对共享 Mod 的说明见[此帖](https://kleiforums.com/forums/topic/128054-questions-regarding-mod-management-post-qol/)；旧版 V1 Mod 文件仍位于共享 `mods/` 中。已发布 `1.0.0` 不支持此布局，必须使用当前源码构建的新镜像。
 
 Tini 作为 PID 1。监督脚本在游戏阶段收到 TERM/INT 后，通过控制台发送 `c_shutdown()` 并关闭输入，等待游戏保存退出；超时才终止进程。更新阶段收到停止信号则终止更新进程组。验证关闭行为时需要同时检查保存日志、退出状态及重启后的世界恢复。
 

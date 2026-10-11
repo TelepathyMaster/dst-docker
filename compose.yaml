@@ -1,39 +1,59 @@
 x-dst: &dst
-  image: ${DST_IMAGE:-dst:local}
+  image: dst:local
   build:
     context: .
-  platform: linux/amd64
-  restart: unless-stopped
   stop_grace_period: 120s
   networks: [dst]
+  environment: &dst-environment
+    CLUSTER_NAME: Cluster_1
 
 services:
-  master:
+  updater:
     <<: *dst
+    restart: "no"
+    command: update
     environment:
-      CLUSTER_NAME: Cluster_1
+      <<: *dst-environment
       SHARD: Master
     volumes:
-      - master-game:/opt/dst
+      - dst-game:/opt/dst
+      - ./data:/data
+      - ./examples/dedicated_server_mods_setup.lua:/config/dedicated_server_mods_setup.lua:ro
+  master:
+    <<: *dst
+    restart: unless-stopped
+    command: run
+    depends_on:
+      updater:
+        condition: service_completed_successfully
+    environment:
+      <<: *dst-environment
+      SHARD: Master
+    volumes:
+      - dst-game:/opt/dst:ro
       - ./data:/data
       - ./examples/dedicated_server_mods_setup.lua:/config/dedicated_server_mods_setup.lua:ro
     ports:
       - "10999:10999/udp"
   caves:
     <<: *dst
+    restart: unless-stopped
+    command: run
+    depends_on:
+      updater:
+        condition: service_completed_successfully
     environment:
-      CLUSTER_NAME: Cluster_1
+      <<: *dst-environment
       SHARD: Caves
     volumes:
-      - caves-game:/opt/dst
+      - dst-game:/opt/dst:ro
       - ./data:/data
       - ./examples/dedicated_server_mods_setup.lua:/config/dedicated_server_mods_setup.lua:ro
     ports:
-      - "11000:11000/udp"
+      - "10998:10998/udp"
 
 volumes:
-  master-game:
-  caves-game:
+  dst-game:
 networks:
   dst:
     driver: bridge
