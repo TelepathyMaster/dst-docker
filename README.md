@@ -1,11 +1,11 @@
 # DST Docker
 
-[![GitHub](https://img.shields.io/badge/GitHub-Source-181717?logo=github&logoColor=white)](https://github.com/TelepathyMaster/dst-docker)
+[![Docker Hub](https://img.shields.io/badge/Docker_Hub-Image-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/srtkz/dst-dedicated-server)
+[![GitHub tag](https://img.shields.io/github/tag/TelepathyMaster/dst-docker?label=release)](https://github.com/TelepathyMaster/dst-docker/tags)
 
-[简体中文](README.zh-CN.md)
+[简中文档](README.zh-CN.md)
 
-Docker Hub: [srtkz/dst-dedicated-server](https://hub.docker.com/r/srtkz/dst-dedicated-server). This guide targets **v1.1.0**, using `srtkz/dst-dedicated-server:1.1.0`.
-
+---
 Run a Don't Starve Together dedicated server with Docker, including the surface (Master) and caves (Caves). Start a new world or bring your existing saves. An updater service installs the game and mods once into a shared volume. The surface and caves then run from that same installation with read-only mounts.
 
 You need Linux x86_64 (`linux/amd64`), Docker Engine, and Docker Compose. Allow space for one game installation, shared mods, and separate world saves. The server must be able to reach Steam and Klei.

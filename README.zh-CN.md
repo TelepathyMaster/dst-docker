@@ -1,11 +1,11 @@
 # DST Docker
 
-[![GitHub](https://img.shields.io/badge/GitHub-Source-181717?logo=github&logoColor=white)](https://github.com/TelepathyMaster/dst-docker)
+[![Docker Hub](https://img.shields.io/badge/Docker_Hub-Image-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/srtkz/dst-dedicated-server)
+[![GitHub tag](https://img.shields.io/github/tag/TelepathyMaster/dst-docker?label=release)](https://github.com/TelepathyMaster/dst-docker/tags)
 
 [English](README.md)
 
-Docker Hub：[srtkz/dst-dedicated-server](https://hub.docker.com/r/srtkz/dst-dedicated-server)。本指南对应 **v1.1.0**，镜像地址为 `srtkz/dst-dedicated-server:1.1.0`。
-
+---
 用 Docker 运行饥荒联机版专用服务器，支持地面（Master）和洞穴（Caves）。可以从零生成新世界，也可以搬入已有存档继续玩。由 updater 服务统一下载和更新游戏及 Mod，地面与洞穴只读共用同一份安装文件。
 
 需要 Linux x86_64（`linux/amd64`）、Docker Engine 和 Docker Compose。请为一份游戏安装、共享 Mod 以及各分片存档预留空间。服务器需要能够连接 Steam 和 Klei。
